@@ -20,7 +20,7 @@ python -m pip install openshift-template-client
 ```
 
 To select a particular published release, use
-`python -m pip install 'openshift-template-client==0.1.0'` (once `0.1.0` is
+`python -m pip install 'openshift-template-client==0.1.1'` (once `0.1.1` is
 published). To upgrade later, use `python -m pip install --upgrade
 openshift-template-client`. Import the installed package as `openshift_templates`.
 
@@ -31,7 +31,7 @@ the repository after pushing the code there. This requires Git:
 python -m pip install 'openshift-template-client @ git+https://github.com/Ravid-Amar/openshift-template-client.git@main'
 ```
 
-Replace `@main` with a pushed release tag such as `@v0.1.0` to select that
+Replace `@main` with a pushed release tag such as `@v0.1.1` to select that
 revision. For development from a local clone:
 
 ```bash

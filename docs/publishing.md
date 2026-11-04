@@ -47,7 +47,7 @@ code. This follows the
 
 The package version is maintained explicitly in `pyproject.toml`. The workflow
 does not derive it from tags or change it automatically. The current version is
-`0.1.0`, ready for the first stable release. Run the checks:
+`0.1.1`, which includes the MIT license in both distributions. Run the checks:
 
 ```bash
 python -m pytest
@@ -61,8 +61,8 @@ and its matching release tag:
 
 ```bash
 git push origin main
-git tag -a v0.1.0 -m "Release 0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "Release 0.1.1"
+git push origin v0.1.1
 ```
 
 Commit and push the workflow before creating the release tag, and tag the commit
@@ -71,7 +71,7 @@ trigger GitHub Actions; the tag must reach GitHub. Creating a new `v*` tag in
 GitHub's interface also triggers the workflow. A GitHub Release is not required.
 
 For each later release, update the version and tag together, for example
-`0.1.1` and `v0.1.1`. A mismatch such as `v0.2.0` with package version `0.1.0`
+`0.1.2` and `v0.1.2`. A mismatch such as `v0.2.0` with package version `0.1.1`
 fails before publication. Development/prerelease versions can also be published
 with matching tags, such as `0.2.0rc1` and `v0.2.0rc1`; installers may need
 `--pre` to select them.
@@ -83,7 +83,7 @@ before publication. Follow the **Publish to PyPI** run in the repository's
 **Actions** tab. Once it succeeds:
 
 ```bash
-python -m pip install 'openshift-template-client==0.1.0'
+python -m pip install 'openshift-template-client==0.1.1'
 ```
 
 PyPI does not permit replacing a previously uploaded distribution filename. If
