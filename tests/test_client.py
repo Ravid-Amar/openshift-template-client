@@ -908,25 +908,33 @@ def test_template_inspection_returns_stored_data_without_processing(
     assert harness.template == original
 
 
-def test_list_templates_collects_every_page_in_one_namespace(harness):
+@pytest.mark.parametrize("operation", [ocp.list_templates, ocp.list_template_names])
+def test_list_templates_collects_every_page_in_one_namespace(harness, operation):
     second = deepcopy(harness.template)
     second["metadata"]["name"] = "second"
     harness.template_pages = {
         None: {"items": [harness.template], "metadata": {"continue": "next-page"}},
         "next-page": {"items": [second], "metadata": {}},
     }
-    assert ocp.list_templates(namespace="infra", api=harness.api) == [harness.template, second]
+    expected = (
+        [harness.template, second] if operation is ocp.list_templates else ["worker", "second"]
+    )
+    with patch.object(harness.api.client, "close") as close:
+        assert operation(namespace="infra", api=harness.api, request_timeout=(2, 5)) == expected
+        close.assert_not_called()
     assert [call["query"] for call in harness.calls] == [{}, {"continue": "next-page"}]
     assert all(
         call["method"] == "GET"
         and call["path"] == "/apis/template.openshift.io/v1/namespaces/infra/templates"
+        and call["timeout"] == (2, 5)
         for call in harness.calls
     )
 
 
-def test_list_templates_empty_namespace(harness):
+@pytest.mark.parametrize("operation", [ocp.list_templates, ocp.list_template_names])
+def test_list_templates_empty_namespace(harness, operation):
     harness.template_pages = {None: {"items": []}}
-    assert ocp.list_templates(namespace="infra", api=harness.api) == []
+    assert operation(namespace="infra", api=harness.api) == []
 
 
 @pytest.mark.parametrize("parameters", [None, []])
@@ -942,6 +950,7 @@ def test_list_template_parameters_without_definitions(harness, parameters):
     "operation,args,endpoint",
     [
         (ocp.list_templates, (), "templates"),
+        (ocp.list_template_names, (), "templates"),
         (ocp.list_template_parameters, ("worker",), "worker"),
     ],
 )
@@ -963,7 +972,8 @@ def test_template_inspection_errors_propagate_and_close_owned_clients(
     assert [call["method"] for call in harness.calls] == ["GET"]
 
 
-def test_list_templates_page_failure_propagates_without_partial_result(harness):
+@pytest.mark.parametrize("operation", [ocp.list_templates, ocp.list_template_names])
+def test_list_templates_page_failure_propagates_without_partial_result(harness, operation):
     harness.template_pages = {
         None: {"items": [harness.template], "metadata": {"continue": "next-page"}},
     }
@@ -976,13 +986,17 @@ def test_list_templates_page_failure_propagates_without_partial_result(harness):
 
     harness.api.client.call_api.side_effect = http
     with pytest.raises(ApiException) as caught:
-        ocp.list_templates(namespace="infra", api=harness.api)
+        operation(namespace="infra", api=harness.api)
     assert caught.value.status == 410
 
 
 @pytest.mark.parametrize(
     "operation,args",
-    [(ocp.list_templates, ()), (ocp.list_template_parameters, ("worker",))],
+    [
+        (ocp.list_templates, ()),
+        (ocp.list_template_names, ()),
+        (ocp.list_template_parameters, ("worker",)),
+    ],
 )
 def test_template_inspection_closes_owned_client_on_success(harness, operation, args):
     with patch("openshift_templates._client.connect", return_value=harness.api):
@@ -993,7 +1007,11 @@ def test_template_inspection_closes_owned_client_on_success(harness, operation, 
 
 @pytest.mark.parametrize(
     "operation,args",
-    [(ocp.list_templates, ()), (ocp.list_template_parameters, ("worker",))],
+    [
+        (ocp.list_templates, ()),
+        (ocp.list_template_names, ()),
+        (ocp.list_template_parameters, ("worker",)),
+    ],
 )
 @pytest.mark.parametrize("value", [None, "", "Bad", "a/b", "a" * 64])
 def test_template_inspection_invalid_namespace_before_connect(operation, args, value):
@@ -1005,7 +1023,11 @@ def test_template_inspection_invalid_namespace_before_connect(operation, args, v
 
 @pytest.mark.parametrize(
     "operation,args",
-    [(ocp.list_templates, ()), (ocp.list_template_parameters, ("worker",))],
+    [
+        (ocp.list_templates, ()),
+        (ocp.list_template_names, ()),
+        (ocp.list_template_parameters, ("worker",)),
+    ],
 )
 @pytest.mark.parametrize("timeout", [None, 0, (1, 0)])
 def test_template_inspection_invalid_timeout_before_connect(operation, args, timeout):

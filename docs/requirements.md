@@ -43,6 +43,7 @@ checks:
 | --- | --- |
 | `connect()` | Configure a reusable client using kubeconfig/context or in-cluster credentials. |
 | `list_templates()` | List all stored Templates in one source namespace, without processing. |
+| `list_template_names()` | Wrap `list_templates()` and return only the names in server order. |
 | `list_template_parameters()` | Read a stored Template's parameter definitions, without processing. |
 | `process()` | Read a stored Template, override parameters, call the processing API, and return rendered objects. |
 | `create()` | Process and server-side apply rendered resources. Existing resources may be updated. |

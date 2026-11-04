@@ -217,6 +217,30 @@ def list_templates(
                 return result
 
 
+def list_template_names(
+    *,
+    namespace: str,
+    api: Optional[DynamicClient] = None,
+    request_timeout: RequestTimeout = REQUEST_TIMEOUT,
+) -> List[str]:
+    """Return stored Template names in a source namespace, in server order.
+
+    Wraps list_templates(), including continuation pages; no Templates returns [].
+    namespace selects the source; api is caller-owned, or a local client is
+    opened/closed. request_timeout is seconds or (connect, read) per request.
+    Requires list permission on templates. Invalid inputs raise ValueError;
+    API errors and timeouts propagate without partial results.
+
+    Example: list_template_names(namespace="infra", api=api)
+    """
+    return [
+        template["metadata"]["name"]
+        for template in list_templates(
+            namespace=namespace, api=api, request_timeout=request_timeout
+        )
+    ]
+
+
 def list_template_parameters(
     template_name: str,
     *,

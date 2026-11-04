@@ -19,6 +19,11 @@ following continuation tokens if present. An empty namespace returns `[]`.
 It never uses the cluster-wide list endpoint or processes any Template. Errors
 on any page propagate without returning a partial list or automatically retrying.
 
+`list_template_names(namespace="infra", api=api)` wraps `list_templates()` and
+returns only each Template's `metadata.name` as a list of strings in server order,
+or `[]` when none exist. It inherits pagination, namespace validation, client
+ownership, timeouts, errors, and the source `list` permission from that function.
+
 `list_template_parameters("worker", namespace="infra", api=api)` reads the named
 Template using the source GET endpoint below and returns its `parameters` list
 in stored order, or `[]` if absent. There is no separate parameter endpoint.
@@ -26,7 +31,7 @@ Definitions retain their supplied `name`, `displayName`, `description`, `require
 `value` (the default), `generate`, and `from` fields; omitted fields remain omitted.
 Inspection does not reject missing required values or unresolved generators.
 
-Both functions require a source `namespace`, with no target namespace argument,
+All three functions require a source `namespace`, with no target namespace argument,
 and accept the usual injected `api` and per-request `request_timeout`. They validate
 arguments before authentication, close clients they open, and leave injected
 clients open. API errors (including 403/404) and transport timeouts propagate.
@@ -105,7 +110,8 @@ performing naive string replacement on YAML/JSON.
 ## Namespace permissions
 
 - Template source namespace: `get` on `templates` in `template.openshift.io`
-  for processing and parameter inspection; `list` for `list_templates()`.
+  for processing and parameter inspection; `list` for `list_templates()` and
+  `list_template_names()`.
 - Target namespace: `create` on `processedtemplates` in `template.openshift.io`.
 - Target resource kinds: `create` and `patch` for server-side apply; `delete`
   for deletion; `get` for inspecting deployed resources. No `list` or `watch` is needed.

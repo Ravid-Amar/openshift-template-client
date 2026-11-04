@@ -26,7 +26,7 @@ python -m pip install openshift-template-client
 ```
 
 To select a particular published release, use
-`python -m pip install 'openshift-template-client==0.1.1'` (once `0.1.1` is
+`python -m pip install 'openshift-template-client==0.1.2'` (once `0.1.2` is
 published). To upgrade later, use `python -m pip install --upgrade
 openshift-template-client`. Import the installed package as `openshift_templates`.
 
@@ -37,7 +37,7 @@ the repository after pushing the code there. This requires Git:
 python -m pip install 'openshift-template-client @ git+https://github.com/Ravid-Amar/openshift-template-client.git@main'
 ```
 
-Replace `@main` with a pushed release tag such as `@v0.1.1` to select that
+Replace `@main` with a pushed release tag such as `@v0.1.2` to select that
 revision. For development from a local clone:
 
 ```bash
@@ -156,6 +156,7 @@ hints and docstrings with parameters, returns, errors, and examples.
 | --- | --- | --- |
 | `connect()` | Loads local kubeconfig/context or in-cluster credentials and discovers APIs. Close its transport with `api.client.close()`. | A reusable `DynamicClient`. |
 | `list_templates()` | Lists all stored Templates in a source `namespace`, including continuation pages. | Full Template dictionaries; `[]` when none exist. |
+| `list_template_names()` | Wraps `list_templates()` to return only Template names, including continuation pages. | Strings in server order; `[]` when none exist. |
 | `list_template_parameters()` | Reads the named Template in a source `namespace`, without processing it. | Parameter definition dictionaries in stored order; `[]` if absent. |
 | `process()` | Fetches a stored Template, overrides parameters in a copy, and asks OpenShift to render it. No resources are deployed. | Rendered manifest dictionaries. |
 | `create()` | Calls `process()`, validates every target, then applies them in order with server-side apply. `field_manager` defaults to `mini-scheduler`; conflicts are preserved. | Identity references, including returned UIDs. |
@@ -219,7 +220,7 @@ import openshift_templates as ocp
 api = ocp.connect()  # Or connect(in_cluster=True) in a pod.
 try:
     templates = ocp.list_templates(namespace="infra", api=api)
-    names = [template["metadata"]["name"] for template in templates]
+    names = ocp.list_template_names(namespace="infra", api=api)
     definitions = ocp.list_template_parameters("worker-template", namespace="infra", api=api)
     required_names = [p["name"] for p in definitions if p.get("required", False)]
 finally:
@@ -232,6 +233,9 @@ Inspection works even when required inputs are missing or generators unresolved.
 Full Templates and defaults may contain secrets, so avoid logging the results.
 API errors and timeouts propagate directly; listing returns no partial results
 if a later page fails.
+
+Use `list_template_names()` when only names are needed. It wraps `list_templates()`
+and inherits its pagination, errors, client ownership, and timeout behavior.
 
 ### Resource UIDs and optional deletion protection
 
@@ -372,7 +376,7 @@ target resource `list` or `watch` permission.
 
 | Namespace | API group / resource | Verbs |
 | --- | --- | --- |
-| Source (`infra`) | `template.openshift.io` / `templates` | `get` (can restrict to the Template's name); add `list` for `list_templates()` |
+| Source (`infra`) | `template.openshift.io` / `templates` | `get` (can restrict to the Template's name); add `list` for `list_templates()` / `list_template_names()` |
 | Target (`workers`) | `template.openshift.io` / `processedtemplates` | `create` |
 | Target (`workers`) | Each rendered resource, e.g. core `configmaps`, `secrets`; `kubevirt.io` / `virtualmachines` | `create`, `patch`, `delete`; add `get` for inspection |
 
@@ -413,7 +417,7 @@ namespace, even for a binding in another namespace). The library does not create
 these Roles/bindings. No ClusterRole, CRD installation, or cluster-admin grant is
 required by this workflow. KubeVirt must already be installed if used.
 
-For `list_templates()`, add a separate source Role rule granting `list` on
+For `list_templates()` / `list_template_names()`, add a separate source Role rule granting `list` on
 `templates` without `resourceNames`. The named `get` rule above already permits
 parameter inspection; listing Templates is optional for create/get/delete.
 
