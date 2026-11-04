@@ -49,7 +49,8 @@ take precedence over generic skill preferences.
   409, validation failures, timeouts, and partial failures for the caller.
 - Do not add automatic rollback or blind retries of mutations.
 - Support explicit kubeconfig/context and in-cluster ServiceAccount auth.
-- Preserve TLS verification and make request timeouts configurable.
+- Enable TLS verification by default, with explicit `connect(verify_ssl=False)` opt-out.
+  Make request timeouts configurable.
 - Never log tokens, parameter values, full rendered Secrets, or kubeconfig content.
 - Importing the package must not authenticate, contact a cluster, or write files.
 

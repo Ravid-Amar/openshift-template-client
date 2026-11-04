@@ -11,7 +11,7 @@ Import: `openshift_templates`.
 Python: 3.9 or later.
 Only direct runtime dependency: `kubernetes`.
 
-## Starting point
+## Original starting point
 
 `src/openshift_templates/_client.py` contains the previous `ocp_templates.py`
 implementation, relocated into an installable package. Formatting and examples
@@ -22,7 +22,9 @@ deletion, and optional deletion using returned references. The initial tests
 check that baseline. They do not establish that every requirement below is
 already implemented.
 
-Known work for Codex:
+The following was the initial upgrade scope, now implemented in the package.
+See [README.md](../README.md) for current behavior and remaining live-cluster
+checks:
 
 - Make stateless template-based deletion the primary documented workflow.
 - Align generator handling: the baseline allows random generation during create
@@ -42,6 +44,7 @@ Known work for Codex:
 | `connect()` | Configure a reusable client using kubeconfig/context or in-cluster credentials. |
 | `process()` | Read a stored Template, override parameters, call the processing API, and return rendered objects. |
 | `create()` | Process and server-side apply rendered resources. Existing resources may be updated. |
+| `get()` | Reprocess template identities (or accept references) and return live resources, including status when present. |
 | `delete()` | Reprocess the template and delete rendered resource identities; no inventory required. |
 
 Keep the existing public names. Adjust optional arguments only when it improves
@@ -68,16 +71,26 @@ Name-based deletion cannot identify the original object UID after replacement.
 Use unique names for every scheduler job, avoid names shared between jobs, and
 document this assumption. Do not describe stateless deletion as UID-protected.
 
+OpenShift stores live UIDs, and create returns them in its references, but
+template-based delete neither fetches nor requires them. Optional reference-based
+deletion uses supplied UIDs as preconditions; references without UIDs are valid.
+For delete/get, a template name is required unless resources are supplied, in
+which case all template inputs must be omitted. Supplying neither mode is invalid.
+
 ## Error and security contract
 
 - Validate all rendered targets before mutating any of them.
 - Reject cluster-scoped objects and objects in another namespace.
 - Unknown parameter names are errors; preserve unspecified template defaults.
 - Missing resources during delete are successful no-ops.
+- `get()` returns full live resource dictionaries in rendered order, without polling or
+  interpreting readiness. Read errors, including 404, propagate immediately.
+  Reading resources requires namespace-scoped `get` permission and no inventory.
 - Surface permission errors, field conflicts, timeouts, and partial failures.
 - Mutation timeouts can have an unknown outcome. Do not imply that an object was
   definitely unchanged because the client did not receive a response.
-- Keep TLS verification enabled and avoid leaking secrets in errors/logging.
+- Keep TLS verification enabled by default; allow explicit `connect(verify_ssl=False)`.
+  Avoid leaking secrets in errors/logging.
 - Applying a multi-object template is not a transaction.
 - Success means API acceptance, not workload readiness or completed deletion.
 - Applying does not automatically prune objects removed from a template.

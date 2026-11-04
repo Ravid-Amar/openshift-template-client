@@ -1,107 +1,348 @@
 # openshift-template-client
 
-A small Python package for fetching existing OpenShift templates, processing
-parameters through OpenShift, and applying/deleting the resulting resources.
-Designed for use by a separate mini scheduler.
+A minimal synchronous Python library for a separate mini scheduler to process
+existing OpenShift Templates and create, inspect, or delete their namespaced resources.
+Python 3.9+; `kubernetes>=30,<35` is the only direct runtime dependency.
 
-**This is a runnable starter for a Codex upgrade.** The previous module is
-packaged under `src/openshift_templates/`. The intended improvements are in
-[docs/requirements.md](docs/requirements.md); they are not all implemented yet.
+It uses Kubernetes `DynamicClient` discovery, including installed APIs such as
+KubeVirt `VirtualMachine`. OpenShift performs parameter substitution; no local
+template engine or `oc`/`kubectl` subprocess is used. Scheduling stays in the
+caller. Importing the package does not authenticate or contact a cluster.
 
-Start with [START_HERE.md](START_HERE.md). Project instructions live in
-[AGENTS.md](AGENTS.md), and the initial task is [CODEX_PROMPT.md](CODEX_PROMPT.md).
-
-## Install for development
+## Install
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install .           # From this repository
+# For development instead:
 python -m pip install -e '.[dev]'
 ```
 
-Python 3.9+. The only direct runtime dependency is `kubernetes`.
+Both pip/venv and the existing `src/` layout are supported. No uv migration is
+required. See [START_HERE.md](START_HERE.md) for wheelhouse installation offline.
 
-## Current baseline usage
+## Local kubeconfig: create, then delete after restart
 
-Use explicit values for all template parameters that have random generators.
-The template in this example already exists in OpenShift.
+The `worker-template` Template must already exist in `infra`. The target
+namespace `workers` and required namespaced APIs must also exist. Adapt the
+parameter names to your Template, including explicit values for every unresolved
+generator. This example assumes `VM_NAME` and `IMAGE_TAG` are its parameters.
 
 ```python
 import openshift_templates as ocp
 
-api = ocp.connect()  # Local kubeconfig; accepts kubeconfig= and context=.
+api = ocp.connect(kubeconfig="/path/to/kubeconfig", context="dev", request_timeout=(5, 30))
+try:
+    refs = ocp.create(
+        "worker-template",
+        {"VM_NAME": "worker-001", "IMAGE_TAG": "1.2.3"},
+        namespace="workers",
+        template_namespace="infra",
+        api=api,
+        request_timeout=(5, 30),
+    )
+finally:
+    api.client.close()
+```
+
+Later, in a fresh process, use the same template and inputs. No create result,
+resource inventory, or discovery cache needs to be retained:
+
+```python
+import openshift_templates as ocp
+
+api = ocp.connect(kubeconfig="/path/to/kubeconfig", context="dev")
+try:
+    deleted = ocp.delete(
+        "worker-template",
+        {"VM_NAME": "worker-001", "IMAGE_TAG": "1.2.3"},
+        namespace="workers",
+        template_namespace="infra",
+        api=api,
+    )
+finally:
+    api.client.close()
+```
+
+`connect()` without kubeconfig/context uses the Kubernetes client's usual local
+kubeconfig search and current context. Omitting `api` from an operation opens a
+local client and closes it on success or failure. Injected clients remain open
+for reuse; their owner must close `api.client`. `connect()` closes its transport
+if discovery fails. TLS certificate verification defaults to `True`; configure
+the cluster CA in kubeconfig. To disable verification explicitly, use
+`connect(verify_ssl=False)` and pass that client as `api` to operations. This
+setting applies to discovery and all resource requests, with either auth mode
+(including `connect(in_cluster=True, verify_ssl=False)`):
+
+```python
 params = {"VM_NAME": "worker-001", "IMAGE_TAG": "1.2.3"}
-
-# Process and apply. Missing objects are created; existing ones may be updated.
-resources = ocp.create(
-    "worker-template",
-    params,
-    namespace="workers",
-    template_namespace="infra",
-    api=api,
-)
+api = ocp.connect(kubeconfig="/path/to/kubeconfig", context="dev", verify_ssl=False)
+try:
+    objects = ocp.get(
+        "worker-template", params, namespace="workers", template_namespace="infra", api=api
+    )
+finally:
+    api.client.close()
 ```
 
-Later, even in another process, delete using the same inputs:
+With verification disabled, the server certificate is not authenticated.
+Kubeconfig updates and HTTP debug output are disabled by `connect()`.
+
+## In-cluster ServiceAccount
+
+Inside a pod with ServiceAccount credentials and cluster CA mounted, use:
 
 ```python
 import openshift_templates as ocp
 
-api = ocp.connect()
-ocp.delete(
-    "worker-template",
-    {"VM_NAME": "worker-001", "IMAGE_TAG": "1.2.3"},
-    namespace="workers",
-    template_namespace="infra",
-    api=api,
+params = {"VM_NAME": "worker-002", "IMAGE_TAG": "1.2.3"}
+api = ocp.connect(in_cluster=True)
+try:
+    ocp.create("worker-template", params, namespace="workers", template_namespace="infra", api=api)
+finally:
+    api.client.close()
+
+# Later, including in a new pod/process with the same stored job inputs:
+api = ocp.connect(in_cluster=True)
+try:
+    ocp.delete("worker-template", params, namespace="workers", template_namespace="infra", api=api)
+finally:
+    api.client.close()
+```
+
+Do not combine `in_cluster=True` with kubeconfig/context. Grant this
+ServiceAccount the permissions below in the source and target namespaces.
+
+## Public API
+
+Import as `openshift_templates`. All operations are synchronous and have type
+hints and docstrings with parameters, returns, errors, and examples.
+
+| Function | What it does | Returns |
+| --- | --- | --- |
+| `connect()` | Loads local kubeconfig/context or in-cluster credentials and discovers APIs. Close its transport with `api.client.close()`. | A reusable `DynamicClient`. |
+| `process()` | Fetches a stored Template, overrides parameters in a copy, and asks OpenShift to render it. No resources are deployed. | Rendered manifest dictionaries. |
+| `create()` | Calls `process()`, validates every target, then applies them in order with server-side apply. `field_manager` defaults to `mini-scheduler`; conflicts are preserved. | Identity references, including returned UIDs. |
+| `get()` | Reconstructs template identities and reads the currently deployed objects in order. It takes the same template arguments as `create()`, or `resources=refs`. | Full live dictionaries, including each kind's `status` when present. |
+| `delete()` | Reconstructs template identities and deletes them in reverse order. Missing objects are already absent. It also accepts `resources=refs`. | Successful identity references. |
+
+`process`, `create`, `get`, and `delete` accept `template_name`, optional
+`parameters`, required target `namespace`, optional `template_namespace`,
+optional injected `api`, and `request_timeout`. `get`/`delete` accept either
+template inputs or `resources`, never both. Their `template_name` defaults to
+`None` to allow the reference mode; it is required when `resources` is omitted.
+Supplying neither mode is invalid. All five functions have examples
+and explanations in their docstrings; internal helper functions explain their
+single responsibility where they are defined.
+
+`template_namespace` defaults to the target `namespace` only when omitted.
+Explicitly invalid/empty namespaces fail before authentication or API requests.
+Parameters are string-keyed mappings of strings, booleans, integers, or finite
+floats; booleans become `true`/`false`, other scalar values become strings.
+Unknown names and `None` values are errors. Unspecified Template defaults remain
+intact. Overrides remove the parameter's `generate` and `from` fields in a copy;
+the stored Template is never changed.
+
+Each operation accepts positive seconds or a `(connect, read)` seconds tuple;
+the default is `(10, 60)`. This is a per-request timeout, not a whole-operation
+deadline. `connect(request_timeout=...)` configures discovery and direct client
+calls. Pass the operation's `request_timeout` separately for its Template GET,
+processing POST, and resource mutations. With an injected client, discovery uses
+that client's configuration. Clients constructed by `connect()` disable
+transport retries; injected clients should also disable mutation retries.
+
+`process(..., for_delete=True)` remains accepted for compatibility. Deterministic
+parameter checks now apply regardless of that flag, including processing only.
+To inspect rendering:
+
+```python
+objects = ocp.process(
+    "worker-template", params, namespace="workers", template_namespace="infra", api=api
 )
 ```
 
-Inside an OpenShift pod, use `ocp.connect(in_cluster=True)` instead. Its
-ServiceAccount must have the appropriate namespace-scoped permissions.
+### Resource UIDs and optional deletion protection
 
-For processing only, call `ocp.process()` with the same template/namespace/client
-arguments. It returns rendered manifest dictionaries without applying them.
+OpenShift assigns each resource a UID and stores it in the live object's
+`metadata.uid`. `create()` copies that UID from the server-side apply response
+into its returned references. The package does not save those references or UIDs
+to disk; retaining them is optional.
 
-The baseline also supports `ocp.delete(namespace="workers", resources=resources,
-api=api)`. This optional path can use returned UIDs; it is not required for the
-template-based workflow.
+Template-based deletion works after a pod/process restart using the same job
+inputs. It reprocesses the Template and deletes by name and namespace, without
+fetching the live resources or their UIDs. No saved `create()` result is needed.
 
-## Stateless assumptions
+The optional reference mode skips Template processing and uses any supplied UID
+as a deletion precondition:
 
-- Template-based deletion needs the same resource kinds, names, and namespaces
-  as the original run. Keep the template revision compatible and reuse inputs.
-- Renaming/removing a resource in the source template can leave the old object
-  outside the set reconstructed by delete. Apply does not automatically prune.
-- Use unique names per scheduler job. Do not place shared resources in templates
-  deleted independently by each job.
-- Without saved UIDs, template-based deletion is by name and does not distinguish
-  an original object from a later replacement with the same identity.
-- The baseline permits generation during create but blocks unresolved generators
-  during template-based delete. The initial Codex task aligns both behaviors.
+```python
+import openshift_templates as ocp
+
+params = {"VM_NAME": "worker-001", "IMAGE_TAG": "1.2.3"}
+api = ocp.connect()  # Or connect(in_cluster=True) in a pod.
+try:
+    refs = ocp.create(
+        "worker-template", params, namespace="workers", template_namespace="infra", api=api
+    )
+    # template_name defaults to None here because resources supplies the identities.
+    # A saved UID protects against deleting a replacement object with the same name.
+    ocp.delete(namespace="workers", resources=refs, api=api)
+finally:
+    api.client.close()
+```
+
+If a live object's UID differs from the supplied UID, the server rejects that
+deletion with 409, exposed through `OperationError`. References without UIDs are
+also accepted and delete by name/namespace. Omit `template_name`, `parameters`,
+and `template_namespace` when passing `resources`. An empty reference list is a
+valid no-op. A UID embedded in a rendered Template is never used as a deletion
+precondition.
+
+`get()` returns current live UIDs, but reading one before deletion cannot prove
+that it belongs to the original object: a replacement may already exist. Only
+retaining the original UID provides that additional identity protection.
+
+## Inspect deployed resources
+
+Use the same job inputs after restart, or pass `resources=refs` from create.
+`get()` reads the main resource endpoints, including KubeVirt VirtualMachines;
+it does not poll, wait, or decide whether a workload is ready.
+
+```python
+import openshift_templates as ocp
+
+api = ocp.connect()  # Or connect(in_cluster=True) in a pod.
+try:
+    objects = ocp.get(
+        "worker-template",
+        {"VM_NAME": "worker-001", "IMAGE_TAG": "1.2.3"},
+        namespace="workers",
+        template_namespace="infra",
+        api=api,
+    )
+    for obj in objects:
+        print(obj["kind"], obj["metadata"]["name"], obj.get("status", {}))
+finally:
+    api.client.close()
+```
+
+These are live responses, unlike the desired manifests from `process()`. A kind
+such as ConfigMap may have no `status`. Read errors, including 404 for a missing
+resource, 403, and timeouts, propagate immediately; a failed call returns no
+partial list. Responses include the full object, so avoid logging Secret objects.
+Each object is read sequentially; the list is not an atomic cluster snapshot.
+
+## Stateless replay and namespace boundaries
+
+- Both create and template-based delete reject unresolved parameter generators,
+  even if a generator appears unrelated to an object's name. Supply explicit
+  values, or use a nonempty fixed default already in the Template. No random
+  value is regenerated by these operations.
+- Every rendered object needs a stable `metadata.name`. `metadata.generateName`
+  is rejected even when a name is also supplied.
+- All rendered targets are discovered and validated before any resource apply
+  or delete. Only namespaced resources in the requested target namespace are
+  accepted. An omitted/empty manifest namespace becomes the target namespace;
+  another namespace, or any cluster-scoped kind, is rejected. Namespace and CRD
+  creation are outside this library.
+- Stateless replay depends on compatible Template revisions and the same
+  parameters reproducing identical API resource kinds, names, and namespaces.
+  Keep that revision available. Renaming/removing an object can leave the old
+  object undiscoverable by replay. Apply does not prune removed objects.
+- Use unique names per scheduler job. Manage shared resources separately.
+  Template-based deletion is by name: it can delete a replacement with the same
+  identity and provides no original-UID protection after restart.
+
+For core `v1` Secrets, create converts UTF-8 `stringData` to base64 `data` before
+server-side apply, preserving existing keys and giving `stringData` precedence
+on collisions. This follows the API's merge behavior and avoids the documented
+[Secret stringData limitations with server-side apply](https://kubernetes.io/docs/concepts/configuration/secret/#working-with-secrets).
+Normalization uses only the standard library, works on copies, and does not
+change `process()` output. Base64 is not encryption.
 
 ## Failures and completion
 
-`OperationError.resources` contains successful operations, and `.failures`
-contains resource references paired with exceptions. Apply stops at its first
-failed mutation; delete attempts all targets. Missing delete targets are ignored.
-No automatic rollback is performed.
+Invalid arguments and unsafe rendered identities raise `ValueError`. Failures
+before resource mutations (authentication, discovery, Template GET/POST,
+processing timeouts) propagate directly from the Kubernetes client/transport.
+Other schema validation remains the server's responsibility.
 
-Success means API acceptance, not VM readiness or completed background deletion.
-Multi-object operations are not transactional. The baseline timeout is fixed at
-10 seconds to connect and 60 seconds to read; making it configurable is part
-of the upgrade. A mutation timeout can leave the result unknown.
+Mutation failures raise `OperationError`. Its `.operation` is `Apply` or `Delete`,
+`.resources` contains successful identity references, and `.failures` contains
+`(reference, original_exception)` pairs. Apply stops at its first failure;
+delete attempts every validated target in reverse order. Only an individual
+delete's 404 is a successful no-op. Permission errors (403), field/UID conflicts
+(409), validation errors, and timeouts remain visible. No rollback or automatic
+mutation retry is performed.
 
-## Permissions
+```python
+try:
+    ocp.create("worker-template", params, namespace="workers", template_namespace="infra", api=api)
+except ocp.OperationError as error:
+    accepted = error.resources
+    failed_references = [ref for ref, exception in error.failures]
+    # Let your scheduler decide how to reconcile the outcome.
+```
 
-Source namespace: `get` on `templates.template.openshift.io`.
-Target namespace: `create` on `processedtemplates.template.openshift.io` and
-`create`, `patch`, and `delete` on the resource kinds in the template.
-API discovery access is also needed. Cluster-scoped objects are rejected.
+Multi-object operations are not transactional. A mutation timeout has an unknown
+outcome: the server may have accepted it. Success means API acceptance, not VM
+readiness or completed background deletion. The package does not log tokens,
+parameter values, or rendered Secrets. References and the `OperationError`
+message contain identities only; raw exceptions/tracebacks may include server
+response bodies, so avoid logging them wholesale.
 
-See [docs/api-notes.md](docs/api-notes.md) for endpoint and reference details.
+## Namespace-scoped permissions
 
-## Validation
+Grant only the API groups/kinds actually used by your Templates. Ordinary API
+discovery access is needed; it grants no cluster-scoped mutation permission.
+`get()` additionally needs target resource `get` permission. No operation needs
+target resource `list` or `watch` permission.
+
+| Namespace | API group / resource | Verbs |
+| --- | --- | --- |
+| Source (`infra`) | `template.openshift.io` / `templates` | `get` (can restrict to the Template's name) |
+| Target (`workers`) | `template.openshift.io` / `processedtemplates` | `create` |
+| Target (`workers`) | Each rendered resource, e.g. core `configmaps`, `secrets`; `kubevirt.io` / `virtualmachines` | `create`, `patch`, `delete`; add `get` for inspection |
+
+Example Roles for a Template producing ConfigMaps, Secrets, and VirtualMachines:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: worker-template-reader
+  namespace: infra
+rules:
+  - apiGroups: [template.openshift.io]
+    resources: [templates]
+    resourceNames: [worker-template]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: worker-template-manager
+  namespace: workers
+rules:
+  - apiGroups: [template.openshift.io]
+    resources: [processedtemplates]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [configmaps, secrets]
+    verbs: [create, patch, delete, get]
+  - apiGroups: [kubevirt.io]
+    resources: [virtualmachines]
+    verbs: [create, patch, delete, get]
+```
+
+Have namespace owners bind each Role with a RoleBinding in its namespace to
+your user or the pod's ServiceAccount (specify the ServiceAccount's actual
+namespace, even for a binding in another namespace). The library does not create
+these Roles/bindings. No ClusterRole, CRD installation, or cluster-admin grant is
+required by this workflow. KubeVirt must already be installed if used.
+
+## Development and validation
 
 ```bash
 python -m pytest
@@ -110,9 +351,26 @@ python -m ruff format --check .
 python -m build
 ```
 
-The tests mock the HTTP transport while exercising the actual Kubernetes
-dynamic client. Live OpenShift integration remains a separate verification step.
+Tests block real credential loading/network access and mock transport while
+exercising the real DynamicClient's HTTP construction. They cover replay with a
+fresh client, optional UID preconditions, live status reads, namespace/scope
+boundaries, generators, reverse/repeated deletion, SSA conflicts, partial
+failures, timeouts (including discovery), Secret
+normalization, and client ownership. Builds use `pyproject.toml` and produce a
+wheel and sdist; isolated builds may fetch build dependencies.
 
-The starter was checked with Python 3.12 and kubernetes 34.1.0. Package/test
-syntax was also checked against Python 3.9 grammar; execution on a Python 3.9
-interpreter remains a target-environment check.
+A clean-environment wheel import can be checked without cluster credentials:
+
+```bash
+python -m venv /tmp/openshift-template-wheel-check
+/tmp/openshift-template-wheel-check/bin/python -m pip install dist/*.whl
+/tmp/openshift-template-wheel-check/bin/python -I -c 'import openshift_templates'
+```
+
+For a fully offline install/build, prepare a wheelhouse as described in
+[START_HERE.md](START_HERE.md). Python 3.9 syntax compatibility is maintained;
+runtime checks here use Python 3.12 and kubernetes 34.1.0. Actual Python 3.9
+execution and live OpenShift validation remain target-environment checks.
+Live checks should confirm deployed-version processing, RBAC, SSA/Secret and
+KubeVirt behavior, and admission/finalizer effects. See
+[docs/api-notes.md](docs/api-notes.md) for endpoint details and official sources.

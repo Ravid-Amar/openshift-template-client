@@ -1,5 +1,10 @@
 # Start the project
 
+This guide records the original starter setup and upgrade workflow. The upgrade
+is now implemented; for current package usage, see [README.md](README.md). For an
+existing checkout, create the development environment in step 2 and run the
+checks in step 3; the extraction and initial upgrade steps are historical.
+
 Use Bash on Linux, macOS, or WSL. Requirements: Python 3.9+, Git, and an already
 installed/signed-in Codex CLI. No cluster login is needed for setup or tests.
 
