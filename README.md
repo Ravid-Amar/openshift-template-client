@@ -401,3 +401,7 @@ execution and live OpenShift validation remain target-environment checks.
 Live checks should confirm deployed-version processing, RBAC, SSA/Secret and
 KubeVirt behavior, and admission/finalizer effects. See
 [docs/api-notes.md](docs/api-notes.md) for endpoint details and official sources.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

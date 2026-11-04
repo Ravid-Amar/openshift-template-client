@@ -7,6 +7,8 @@ name = "openshift-template-client"
 version = "0.1.0"
 description = "Small Python client for OpenShift templates and their resources"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = ["kubernetes>=30,<35"]
 
