@@ -11,16 +11,43 @@ caller. Importing the package does not authenticate or contact a cluster.
 
 ## Install
 
+After the first successful PyPI release, install remotely without cloning:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install .           # From this repository
-# For development instead:
+python -m pip install openshift-template-client
+```
+
+To select a particular published release, use
+`python -m pip install 'openshift-template-client==0.1.0'` (once `0.1.0` is
+published). To upgrade later, use `python -m pip install --upgrade
+openshift-template-client`. Import the installed package as `openshift_templates`.
+
+Before publishing to PyPI, or to use the GitHub source, install directly from
+the repository after pushing the code there. This requires Git:
+
+```bash
+python -m pip install 'openshift-template-client @ git+https://github.com/Ravid-Amar/openshift-template-client.git@main'
+```
+
+Replace `@main` with a pushed release tag such as `@v0.1.0` to select that
+revision. For development from a local clone:
+
+```bash
+git clone https://github.com/Ravid-Amar/openshift-template-client.git
+cd openshift-template-client
 python -m pip install -e '.[dev]'
 ```
 
 Both pip/venv and the existing `src/` layout are supported. No uv migration is
 required. See [START_HERE.md](START_HERE.md) for wheelhouse installation offline.
+
+Pushing a `v*` tag runs the [PyPI publishing workflow](.github/workflows/publish.yml).
+The tag must equal `v` plus the version in `pyproject.toml`. See
+[Publishing releases](docs/publishing.md) for the one-time GitHub/PyPI setup and
+release commands. PyPI installation becomes available after a successful upload;
+creating this workflow alone does not publish a package.
 
 ## Local kubeconfig: create, then delete after restart
 

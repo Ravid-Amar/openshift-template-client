@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openshift-template-client"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Small Python client for OpenShift templates and their resources"
 readme = "README.md"
 requires-python = ">=3.9"
