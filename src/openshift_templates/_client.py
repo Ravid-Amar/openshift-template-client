@@ -13,6 +13,7 @@ from kubernetes.dynamic import DynamicClient
 from kubernetes.dynamic.exceptions import NotFoundError
 from kubernetes.dynamic.resource import Resource
 
+# OpenShift 4.20 serves Templates as v1; the product release is not an API version.
 API_VERSION = "template.openshift.io/v1"
 RequestTimeout = Union[float, Tuple[float, float]]
 Parameters = Mapping[str, Union[str, bool, int, float]]
@@ -53,6 +54,16 @@ def _validate_timeout(request_timeout: RequestTimeout) -> None:
         raise ValueError("request_timeout must be positive seconds or a (connect, read) pair")
 
 
+def _validate_namespace(value: str, argument: str = "namespace") -> None:
+    """Require a namespace DNS label before authentication or network requests."""
+    if (
+        not isinstance(value, str)
+        or len(value) > 63
+        or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", value)
+    ):
+        raise ValueError(f"{argument} must be a nonempty DNS label of at most 63 characters")
+
+
 def _validate_inputs(
     template_name: Optional[str],
     parameters: Optional[Parameters],
@@ -69,12 +80,7 @@ def _validate_inputs(
     if template_namespace is not None:
         namespaces["template_namespace"] = template_namespace
     for argument, value in namespaces.items():
-        if (
-            not isinstance(value, str)
-            or len(value) > 63
-            or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", value)
-        ):
-            raise ValueError(f"{argument} must be a nonempty DNS label of at most 63 characters")
+        _validate_namespace(value, argument)
     _validate_timeout(request_timeout)
     # get/delete have two exclusive input modes. An empty reference list is valid;
     # None selects template replay, which requires a template_name below.
@@ -176,6 +182,70 @@ def _using_api(
             active.client.close()
 
 
+def list_templates(
+    *,
+    namespace: str,
+    api: Optional[DynamicClient] = None,
+    request_timeout: RequestTimeout = REQUEST_TIMEOUT,
+) -> List[Manifest]:
+    """Return all stored Template dictionaries in one namespace, without processing.
+
+    namespace is the source namespace; no target namespace is needed. Results
+    follow server order, including any continuation pages; an empty namespace
+    returns []. Dictionaries include objects and parameter defaults, which can
+    contain secrets. api is caller-owned; otherwise a local client is opened and
+    closed. request_timeout is seconds or (connect, read) seconds per request.
+    Invalid inputs raise ValueError. API errors and timeouts propagate without
+    partial results. Requires list permission on templates in namespace.
+
+    Example: list_templates(namespace="infra", api=api)
+    """
+    _validate_namespace(namespace)
+    _validate_timeout(request_timeout)
+    with _using_api(api, request_timeout) as active:
+        templates = active.resources.get(api_version=API_VERSION, kind="Template", name="templates")
+        result = []
+        continuation = None
+        while True:
+            options = {"_continue": continuation} if continuation else {}
+            page = templates.get(
+                namespace=namespace, _request_timeout=request_timeout, **options
+            ).to_dict()
+            result.extend(page.get("items", []))
+            continuation = page.get("metadata", {}).get("continue")
+            if not continuation:
+                return result
+
+
+def list_template_parameters(
+    template_name: str,
+    *,
+    namespace: str,
+    api: Optional[DynamicClient] = None,
+    request_timeout: RequestTimeout = REQUEST_TIMEOUT,
+) -> List[Manifest]:
+    """Return a stored Template's parameter definitions in their original order.
+
+    template_name is read from the source namespace given by namespace. Each
+    dictionary retains supplied fields such as name, displayName, description,
+    required, value, generate, and from; absent fields are not synthesized.
+    Templates without parameters return []. No processing or generator/required
+    validation occurs. Defaults may contain secrets. api is caller-owned;
+    otherwise a local client is opened/closed. request_timeout is seconds or
+    (connect, read) seconds. Invalid inputs raise ValueError; API errors (including
+    404/403) and timeouts propagate. Requires get permission on the Template.
+
+    Example: list_template_parameters("worker", namespace="infra", api=api)
+    """
+    _validate_inputs(template_name, None, namespace, None, request_timeout)
+    with _using_api(api, request_timeout) as active:
+        templates = active.resources.get(api_version=API_VERSION, kind="Template", name="templates")
+        template = templates.get(
+            name=template_name, namespace=namespace, _request_timeout=request_timeout
+        ).to_dict()
+        return template.get("parameters", [])
+
+
 def process(
     template_name: str,
     parameters: Optional[Parameters] = None,
@@ -189,7 +259,8 @@ def process(
     """Return manifests rendered by OpenShift, without applying them.
 
     template_name is fetched from template_namespace (defaults to namespace).
-    parameters override matching defaults; unresolved generators are rejected.
+    parameters override matching defaults; unresolved generators and required
+    parameters without nonempty values are rejected before the processing POST.
     namespace selects the processing endpoint. api is caller-owned; if omitted,
     a local client is opened/closed. request_timeout is seconds or (connect, read).
     for_delete is retained for compatibility; deterministic checks always apply.
@@ -232,6 +303,16 @@ def process(
                 "Unresolved parameter generators: "
                 + ", ".join(generated)
                 + ". Supply explicit values for deterministic replay."
+            )
+        missing = sorted(
+            p["name"] for p in definitions.values() if p.get("required") and not p.get("value")
+        )
+        if missing:
+            source = template_namespace if template_namespace is not None else namespace
+            raise ValueError(
+                f"Missing required template parameters for {source}/{template_name}: "
+                + ", ".join(missing)
+                + ". Supply nonempty values in parameters or define nonempty Template defaults."
             )
         processor = active.resources.get(
             api_version=API_VERSION, kind="Template", name="processedtemplates"

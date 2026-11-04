@@ -9,6 +9,12 @@ KubeVirt `VirtualMachine`. OpenShift performs parameter substitution; no local
 template engine or `oc`/`kubectl` subprocess is used. Scheduling stays in the
 caller. Importing the package does not authenticate or contact a cluster.
 
+The Template request contract follows the
+[OpenShift Container Platform 4.20 Template API](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/template_apis/template-template-openshift-io-v1).
+On OpenShift 4.20, the API version is still `template.openshift.io/v1`;
+`4.20` is the platform release. Live-cluster compatibility must be verified in
+your target environment; the automated tests use mocked transport.
+
 ## Install
 
 After the first successful PyPI release, install remotely without cloning:
@@ -149,6 +155,8 @@ hints and docstrings with parameters, returns, errors, and examples.
 | Function | What it does | Returns |
 | --- | --- | --- |
 | `connect()` | Loads local kubeconfig/context or in-cluster credentials and discovers APIs. Close its transport with `api.client.close()`. | A reusable `DynamicClient`. |
+| `list_templates()` | Lists all stored Templates in a source `namespace`, including continuation pages. | Full Template dictionaries; `[]` when none exist. |
+| `list_template_parameters()` | Reads the named Template in a source `namespace`, without processing it. | Parameter definition dictionaries in stored order; `[]` if absent. |
 | `process()` | Fetches a stored Template, overrides parameters in a copy, and asks OpenShift to render it. No resources are deployed. | Rendered manifest dictionaries. |
 | `create()` | Calls `process()`, validates every target, then applies them in order with server-side apply. `field_manager` defaults to `mini-scheduler`; conflicts are preserved. | Identity references, including returned UIDs. |
 | `get()` | Reconstructs template identities and reads the currently deployed objects in order. It takes the same template arguments as `create()`, or `resources=refs`. | Full live dictionaries, including each kind's `status` when present. |
@@ -159,7 +167,7 @@ hints and docstrings with parameters, returns, errors, and examples.
 optional injected `api`, and `request_timeout`. `get`/`delete` accept either
 template inputs or `resources`, never both. Their `template_name` defaults to
 `None` to allow the reference mode; it is required when `resources` is omitted.
-Supplying neither mode is invalid. All five functions have examples
+Supplying neither mode is invalid. All public functions have examples
 and explanations in their docstrings; internal helper functions explain their
 single responsibility where they are defined.
 
@@ -170,6 +178,16 @@ floats; booleans become `true`/`false`, other scalar values become strings.
 Unknown names and `None` values are errors. Unspecified Template defaults remain
 intact. Overrides remove the parameter's `generate` and `from` fields in a copy;
 the stored Template is never changed.
+
+Parameters marked `required: true` must have nonempty values after overrides.
+A nonempty default satisfies this check. Missing values and explicit empty
+overrides raise `ValueError` before the processing POST, naming all missing
+required parameters and the source Template. For example:
+`Missing required template parameters for infra/worker-template: VM_NAME. Supply
+nonempty values in parameters or define nonempty Template defaults.`
+Boolean `False` and numeric `0` overrides are valid (`false` and `0` strings).
+Optional parameters may remain empty. Required generated parameters still need
+a nonempty fixed default or explicit override for deterministic replay.
 
 Each operation accepts positive seconds or a `(connect, read)` seconds tuple;
 the default is `(10, 60)`. This is a per-request timeout, not a whole-operation
@@ -188,6 +206,32 @@ objects = ocp.process(
     "worker-template", params, namespace="workers", template_namespace="infra", api=api
 )
 ```
+
+### Discover Templates and their parameters
+
+These read-only functions use `namespace` for the source namespace; they need no
+target namespace and never process Templates. They accept `api` and
+`request_timeout` with the same ownership and timeout rules as other operations.
+
+```python
+import openshift_templates as ocp
+
+api = ocp.connect()  # Or connect(in_cluster=True) in a pod.
+try:
+    templates = ocp.list_templates(namespace="infra", api=api)
+    names = [template["metadata"]["name"] for template in templates]
+    definitions = ocp.list_template_parameters("worker-template", namespace="infra", api=api)
+    required_names = [p["name"] for p in definitions if p.get("required", False)]
+finally:
+    api.client.close()
+```
+
+Parameter definitions preserve supplied defaults (`value`), descriptions, display
+names, required flags, and generator fields. Omitted fields remain omitted.
+Inspection works even when required inputs are missing or generators unresolved.
+Full Templates and defaults may contain secrets, so avoid logging the results.
+API errors and timeouts propagate directly; listing returns no partial results
+if a later page fails.
 
 ### Resource UIDs and optional deletion protection
 
@@ -328,7 +372,7 @@ target resource `list` or `watch` permission.
 
 | Namespace | API group / resource | Verbs |
 | --- | --- | --- |
-| Source (`infra`) | `template.openshift.io` / `templates` | `get` (can restrict to the Template's name) |
+| Source (`infra`) | `template.openshift.io` / `templates` | `get` (can restrict to the Template's name); add `list` for `list_templates()` |
 | Target (`workers`) | `template.openshift.io` / `processedtemplates` | `create` |
 | Target (`workers`) | Each rendered resource, e.g. core `configmaps`, `secrets`; `kubevirt.io` / `virtualmachines` | `create`, `patch`, `delete`; add `get` for inspection |
 
@@ -369,6 +413,10 @@ namespace, even for a binding in another namespace). The library does not create
 these Roles/bindings. No ClusterRole, CRD installation, or cluster-admin grant is
 required by this workflow. KubeVirt must already be installed if used.
 
+For `list_templates()`, add a separate source Role rule granting `list` on
+`templates` without `resourceNames`. The named `get` rule above already permits
+parameter inspection; listing Templates is optional for create/get/delete.
+
 ## Development and validation
 
 ```bash
@@ -382,7 +430,8 @@ Tests block real credential loading/network access and mock transport while
 exercising the real DynamicClient's HTTP construction. They cover replay with a
 fresh client, optional UID preconditions, live status reads, namespace/scope
 boundaries, generators, reverse/repeated deletion, SSA conflicts, partial
-failures, timeouts (including discovery), Secret
+failures, Template listing/parameter inspection, required-parameter validation,
+timeouts (including discovery), Secret
 normalization, and client ownership. Builds use `pyproject.toml` and produce a
 wheel and sdist; isolated builds may fetch build dependencies.
 

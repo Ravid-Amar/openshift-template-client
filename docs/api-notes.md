@@ -1,7 +1,36 @@
 # OpenShift API notes
 
-This is a compact implementation reference. Check the official documentation
-for the deployed cluster version before changing the request contract.
+This is a compact implementation reference based on OpenShift Container
+Platform 4.20. Its Template API is `template.openshift.io/v1`; `4.20` is the
+platform release, not a value for `apiVersion` or an API URL segment. The GET
+and processing POST endpoints below match the 4.20 reference. Check the official
+documentation for the deployed cluster version before changing the contract;
+this documentation review does not replace live-cluster validation.
+
+## Template discovery and parameter inspection
+
+`list_templates(namespace="infra", api=api)` lists all stored Templates in one
+source namespace:
+
+`GET /apis/template.openshift.io/v1/namespaces/{namespace}/templates`
+
+It returns the `items` from the TemplateList as a list of full dictionaries,
+following continuation tokens if present. An empty namespace returns `[]`.
+It never uses the cluster-wide list endpoint or processes any Template. Errors
+on any page propagate without returning a partial list or automatically retrying.
+
+`list_template_parameters("worker", namespace="infra", api=api)` reads the named
+Template using the source GET endpoint below and returns its `parameters` list
+in stored order, or `[]` if absent. There is no separate parameter endpoint.
+Definitions retain their supplied `name`, `displayName`, `description`, `required`,
+`value` (the default), `generate`, and `from` fields; omitted fields remain omitted.
+Inspection does not reject missing required values or unresolved generators.
+
+Both functions require a source `namespace`, with no target namespace argument,
+and accept the usual injected `api` and per-request `request_timeout`. They validate
+arguments before authentication, close clients they open, and leave injected
+clients open. API errors (including 403/404) and transport timeouts propagate.
+Full Templates and parameter defaults may contain secrets; avoid logging them.
 
 ## Template processing
 
@@ -12,6 +41,18 @@ for the deployed cluster version before changing the request contract.
 2. Work on a copy. Override matching entries in `parameters` while retaining
    unspecified defaults. Explicit values should disable that parameter's
    `generate` and `from` fields. Reject unknown names.
+
+   Before the processing POST, reject unresolved generators for deterministic
+   replay. Then check all parameters marked `required: true`: each must have a
+   nonempty value after overrides. A nonempty Template default satisfies the
+   requirement; an absent value or an explicit empty override does not. Boolean
+   `False` and numeric `0` overrides become the nonempty strings `false` and `0`.
+   Optional parameters may remain empty. Raise `ValueError` listing all missing
+   required names, the source Template identity, and how to supply them, without
+   including parameter values or descriptions. This applies to `process()`,
+   `create()`, and template-based `get()`/`delete()` before any target operations.
+   A required generated parameter still needs a nonempty fixed default or explicit
+   override. OpenShift remains responsible for substitution and schema validation.
 
 3. Submit the Template to the target namespace:
 
@@ -63,7 +104,8 @@ performing naive string replacement on YAML/JSON.
 
 ## Namespace permissions
 
-- Template source namespace: `get` on `templates` in `template.openshift.io`.
+- Template source namespace: `get` on `templates` in `template.openshift.io`
+  for processing and parameter inspection; `list` for `list_templates()`.
 - Target namespace: `create` on `processedtemplates` in `template.openshift.io`.
 - Target resource kinds: `create` and `patch` for server-side apply; `delete`
   for deletion; `get` for inspecting deployed resources. No `list` or `watch` is needed.
@@ -72,7 +114,7 @@ performing naive string replacement on YAML/JSON.
 
 ## Sources
 
-- [OCP 4.17 Template API](https://docs.redhat.com/en/documentation/openshift_container_platform/4.17/html/template_apis/template-template-openshift-io-v1)
+- [OCP 4.20 Template API](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/template_apis/template-template-openshift-io-v1)
 - [Kubernetes Python client](https://github.com/kubernetes-client/python)
 - [Kubernetes server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
 - [Secret stringData and server-side apply](https://kubernetes.io/docs/concepts/configuration/secret/#working-with-secrets)

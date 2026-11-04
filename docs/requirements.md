@@ -42,6 +42,8 @@ checks:
 | Function | Responsibility |
 | --- | --- |
 | `connect()` | Configure a reusable client using kubeconfig/context or in-cluster credentials. |
+| `list_templates()` | List all stored Templates in one source namespace, without processing. |
+| `list_template_parameters()` | Read a stored Template's parameter definitions, without processing. |
 | `process()` | Read a stored Template, override parameters, call the processing API, and return rendered objects. |
 | `create()` | Process and server-side apply rendered resources. Existing resources may be updated. |
 | `get()` | Reprocess template identities (or accept references) and return live resources, including status when present. |
@@ -82,6 +84,10 @@ which case all template inputs must be omitted. Supplying neither mode is invali
 - Validate all rendered targets before mutating any of them.
 - Reject cluster-scoped objects and objects in another namespace.
 - Unknown parameter names are errors; preserve unspecified template defaults.
+- Required parameters must have nonempty values after overrides/defaults. Reject
+  missing/empty required values before processing with a useful `ValueError`
+  naming the missing parameters, without exposing their values. Template and
+  parameter listing remain available even when processing would reject inputs.
 - Missing resources during delete are successful no-ops.
 - `get()` returns full live resource dictionaries in rendered order, without polling or
   interpreting readiness. Read errors, including 404, propagate immediately.

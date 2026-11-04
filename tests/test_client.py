@@ -80,6 +80,7 @@ class ModuleTests(unittest.TestCase):
         self.live_objects[-1]["status"] = {"printableStatus": "Running"}
         self.calls = []
         self.errors = {}
+        self.template_pages = None
         self.api = self.new_api()
 
     def new_api(self):
@@ -104,7 +105,18 @@ class ModuleTests(unittest.TestCase):
         if error:
             raise ApiException(status=error, reason="simulated API error")
         if method == "GET":
-            if "/templates/" in path:
+            if path.endswith("/templates"):
+                page = (
+                    self.template_pages[call["query"].get("continue")]
+                    if self.template_pages is not None
+                    else {"items": [self.template]}
+                )
+                result = {
+                    "apiVersion": "template.openshift.io/v1",
+                    "kind": "TemplateList",
+                    **deepcopy(page),
+                }
+            elif "/templates/" in path:
                 result = deepcopy(self.template)
             else:
                 result = deepcopy(
@@ -864,3 +876,222 @@ def test_get_resource_read_failure_closes_owned_client(harness):
 def test_get_empty_template_returns_empty_list(harness):
     harness.objects = []
     assert ocp.get("worker", {"PASSWORD": "explicit"}, namespace="workers", api=harness.api) == []
+
+
+@pytest.mark.parametrize(
+    "operation,args,endpoint",
+    [
+        (ocp.list_templates, (), "templates"),
+        (ocp.list_template_parameters, ("worker",), "templates/worker"),
+    ],
+)
+def test_template_inspection_returns_stored_data_without_processing(
+    harness, operation, args, endpoint
+):
+    harness.template["parameters"][0].update(
+        required=True, displayName="Worker name", description="Stable resource name"
+    )
+    harness.template["parameters"].append({"name": "REQUIRED_WITHOUT_VALUE", "required": True})
+    original = deepcopy(harness.template)
+    with patch.object(harness.api.client, "close") as close:
+        result = operation(*args, namespace="infra", api=harness.api, request_timeout=(2, 5))
+        close.assert_not_called()
+    expected = [original] if operation is ocp.list_templates else original["parameters"]
+    assert result == expected
+    assert len(harness.calls) == 1
+    assert harness.calls[0]["method"] == "GET"
+    assert harness.calls[0]["path"] == (
+        f"/apis/template.openshift.io/v1/namespaces/infra/{endpoint}"
+    )
+    assert harness.calls[0]["timeout"] == (2, 5)
+    result[0]["value"] = "changed locally"
+    assert harness.template == original
+
+
+def test_list_templates_collects_every_page_in_one_namespace(harness):
+    second = deepcopy(harness.template)
+    second["metadata"]["name"] = "second"
+    harness.template_pages = {
+        None: {"items": [harness.template], "metadata": {"continue": "next-page"}},
+        "next-page": {"items": [second], "metadata": {}},
+    }
+    assert ocp.list_templates(namespace="infra", api=harness.api) == [harness.template, second]
+    assert [call["query"] for call in harness.calls] == [{}, {"continue": "next-page"}]
+    assert all(
+        call["method"] == "GET"
+        and call["path"] == "/apis/template.openshift.io/v1/namespaces/infra/templates"
+        for call in harness.calls
+    )
+
+
+def test_list_templates_empty_namespace(harness):
+    harness.template_pages = {None: {"items": []}}
+    assert ocp.list_templates(namespace="infra", api=harness.api) == []
+
+
+@pytest.mark.parametrize("parameters", [None, []])
+def test_list_template_parameters_without_definitions(harness, parameters):
+    if parameters is None:
+        harness.template.pop("parameters")
+    else:
+        harness.template["parameters"] = parameters
+    assert ocp.list_template_parameters("worker", namespace="infra", api=harness.api) == []
+
+
+@pytest.mark.parametrize(
+    "operation,args,endpoint",
+    [
+        (ocp.list_templates, (), "templates"),
+        (ocp.list_template_parameters, ("worker",), "worker"),
+    ],
+)
+@pytest.mark.parametrize("error", [403, 404, ReadTimeoutError(None, "/simulated", "timeout")])
+def test_template_inspection_errors_propagate_and_close_owned_clients(
+    harness, operation, args, endpoint, error
+):
+    harness.errors[("GET", endpoint)] = error
+    expected = ReadTimeoutError if isinstance(error, ReadTimeoutError) else ApiException
+    with patch("openshift_templates._client.connect", return_value=harness.api):
+        with patch.object(harness.api.client, "close") as close:
+            with pytest.raises(expected) as caught:
+                operation(*args, namespace="infra")
+            close.assert_called_once_with()
+    if isinstance(error, int):
+        assert caught.value.status == error
+    else:
+        assert caught.value is error
+    assert [call["method"] for call in harness.calls] == ["GET"]
+
+
+def test_list_templates_page_failure_propagates_without_partial_result(harness):
+    harness.template_pages = {
+        None: {"items": [harness.template], "metadata": {"continue": "next-page"}},
+    }
+    original_http = harness.http
+
+    def http(path, method, path_params, query, headers, **kwargs):
+        if dict(query).get("continue"):
+            raise ApiException(status=410, reason="expired continuation")
+        return original_http(path, method, path_params, query, headers, **kwargs)
+
+    harness.api.client.call_api.side_effect = http
+    with pytest.raises(ApiException) as caught:
+        ocp.list_templates(namespace="infra", api=harness.api)
+    assert caught.value.status == 410
+
+
+@pytest.mark.parametrize(
+    "operation,args",
+    [(ocp.list_templates, ()), (ocp.list_template_parameters, ("worker",))],
+)
+def test_template_inspection_closes_owned_client_on_success(harness, operation, args):
+    with patch("openshift_templates._client.connect", return_value=harness.api):
+        with patch.object(harness.api.client, "close") as close:
+            operation(*args, namespace="infra")
+            close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "operation,args",
+    [(ocp.list_templates, ()), (ocp.list_template_parameters, ("worker",))],
+)
+@pytest.mark.parametrize("value", [None, "", "Bad", "a/b", "a" * 64])
+def test_template_inspection_invalid_namespace_before_connect(operation, args, value):
+    with patch("openshift_templates._client.connect") as connect:
+        with pytest.raises(ValueError, match="namespace"):
+            operation(*args, namespace=value)
+        connect.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "operation,args",
+    [(ocp.list_templates, ()), (ocp.list_template_parameters, ("worker",))],
+)
+@pytest.mark.parametrize("timeout", [None, 0, (1, 0)])
+def test_template_inspection_invalid_timeout_before_connect(operation, args, timeout):
+    with patch("openshift_templates._client.connect") as connect:
+        with pytest.raises(ValueError, match="request_timeout"):
+            operation(*args, namespace="infra", request_timeout=timeout)
+        connect.assert_not_called()
+
+
+@pytest.mark.parametrize("name", [None, "", "../other"])
+def test_list_template_parameters_invalid_name_before_connect(name):
+    with patch("openshift_templates._client.connect") as connect:
+        with pytest.raises(ValueError, match="template_name"):
+            ocp.list_template_parameters(name, namespace="infra")
+        connect.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", [ocp.process, ocp.create, ocp.get, ocp.delete])
+@pytest.mark.parametrize("default", [None, "", "nonempty-default"])
+@pytest.mark.parametrize("override", [None, ""])
+def test_missing_required_parameters_fail_before_processing(harness, operation, default, override):
+    definition = {"name": "VM_NAME", "required": True, "description": "private-description"}
+    if default is not None:
+        definition["value"] = default
+    harness.template["parameters"][0] = definition
+    harness.template["parameters"].append({"name": "ANOTHER", "required": True})
+    parameters = {"PASSWORD": "private-password"}
+    if override is not None:
+        parameters["VM_NAME"] = override
+    original = deepcopy(harness.template)
+    with pytest.raises(ValueError) as caught:
+        operation(
+            "worker", parameters, namespace="workers", template_namespace="infra", api=harness.api
+        )
+    missing = (
+        "ANOTHER" if default == "nonempty-default" and override is None else "ANOTHER, VM_NAME"
+    )
+    assert str(caught.value) == (
+        f"Missing required template parameters for infra/worker: {missing}. "
+        "Supply nonempty values in parameters or define nonempty Template defaults."
+    )
+    assert harness.template == original
+    assert [call["method"] for call in harness.calls] == ["GET"]
+
+
+@pytest.mark.parametrize("value", ["provided", False, 0, 1.5, " "])
+def test_required_parameters_accept_nonempty_scalar_overrides(harness, value):
+    harness.template["parameters"][0] = {"name": "VM_NAME", "required": True}
+    ocp.process(
+        "worker", {"VM_NAME": value, "PASSWORD": "explicit"}, namespace="workers", api=harness.api
+    )
+    expected = str(value).lower() if isinstance(value, bool) else str(value)
+    assert harness.calls_for("POST")[0]["body"]["parameters"][0]["value"] == expected
+
+
+def test_required_defaults_preserved_and_optional_empty_values_allowed(harness):
+    harness.template["parameters"][0]["required"] = True
+    harness.template["parameters"].extend(
+        [{"name": "OPTIONAL_EMPTY", "value": "", "required": False}, {"name": "OPTIONAL_MISSING"}]
+    )
+    ocp.process("worker", {"PASSWORD": "explicit"}, namespace="workers", api=harness.api)
+    assert harness.calls_for("POST")[0]["body"]["parameters"] == [
+        *harness.template["parameters"][:2],
+        {"name": "PASSWORD", "value": "explicit"},
+        *harness.template["parameters"][3:],
+    ]
+
+
+@pytest.mark.parametrize("operation", [ocp.process, ocp.create, ocp.get, ocp.delete])
+@pytest.mark.parametrize("override", [None, "", "explicit"])
+def test_required_generator_still_needs_nonempty_explicit_value(harness, operation, override):
+    harness.template["parameters"][2]["required"] = True
+    parameters = {} if override is None else {"PASSWORD": override}
+    if override == "explicit":
+        operation("worker", parameters, namespace="workers", api=harness.api)
+        assert harness.calls_for("POST")[0]["body"]["parameters"][2] == {
+            "name": "PASSWORD",
+            "required": True,
+            "value": "explicit",
+        }
+    else:
+        expected = (
+            "Unresolved parameter generators"
+            if override is None
+            else "Missing required template parameters"
+        )
+        with pytest.raises(ValueError, match=expected):
+            operation("worker", parameters, namespace="workers", api=harness.api)
+        assert [call["method"] for call in harness.calls] == ["GET"]
